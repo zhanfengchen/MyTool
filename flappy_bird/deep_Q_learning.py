@@ -15,21 +15,21 @@ import random
 
 INIT_EPLISON = 0.1
 FINAL_EPLISON = 0.00001
-X_MEMORY = 5000
-OBSERVE = 100
+X_MEMORY = 50000
+observe = 10000
 
 ITERATION = 5000000
 
-BATCH_SIZE = 16
+BATCH_SIZE = 32
 ACTIONS = 2
 GAMMA = 1.0
 
-CHECK_POINTER_TIMES = 20000
+CHECK_POINTER_TIMES = 50000
 MODEL_PATH = "./saved_networks"
 
 
 def weight_variable(shape):
-    variable = tf.truncated_normal(shape, mean=0., stddev=0.01)
+    variable = tf.truncated_normal(shape, stddev=0.01)
     return tf.Variable(variable)
 
 
@@ -47,7 +47,7 @@ def max_pool_2x2(input):
 
 
 def create_network():
-    s_t = tf.placeholder(tf.float32, [None, 80, 80, 4], name="s_t")
+    s_t = tf.placeholder("float", [None, 80, 80, 4], name="s_t")
 
     w_conv1 = weight_variable([8, 8, 4, 32])
     b_conv1 = bias_variable([32])
@@ -74,13 +74,13 @@ def create_network():
     h_pool = tf.reshape(h_pool3, shape=[-1, 256])
 
     # 1st full connection layer
-    w_fc1 = weight_variable([256, 30])
-    b_fc1 = bias_variable([30])
+    w_fc1 = weight_variable([256, 256])
+    b_fc1 = bias_variable([256])
 
     h_fc1 = tf.nn.relu(tf.matmul(h_pool, w_fc1) + b_fc1)
 
     # readout
-    w_fc2 = weight_variable([30, ACTIONS])
+    w_fc2 = weight_variable([256, ACTIONS])
     b_fc2 = bias_variable([ACTIONS])
 
     readout = tf.matmul(h_fc1, w_fc2) + b_fc2
@@ -97,45 +97,52 @@ def binarize_img(img):
 
 def train(s_t, readout, w_fc, sess):
     # train
-    a = tf.placeholder(tf.float32, shape=[None, ACTIONS], name='a')
-    y = tf.placeholder(tf.float32, shape=[None], name="y")
+    a = tf.placeholder("float", shape=[None, ACTIONS], name='a')
+    y = tf.placeholder("float", shape=[None], name="y")
     readout_tensor = tf.reduce_sum(tf.multiply(readout, a), reduction_indices=1)
     cost = tf.reduce_mean(tf.square(y - readout_tensor))
-    train_step = tf.train.AdadeltaOptimizer(0.00001).minimize(cost)
+    train_step = tf.train.AdadeltaOptimizer(1e-6).minimize(cost)
 
     # stay guowangshuju
     D = deque(maxlen=X_MEMORY)
 
     # start with donoting
     game_state = GameState()
+
     do_nothing = np.zeros(ACTIONS)
-    do_nothing[0] = 1.
+    do_nothing[0] = 1
     next_img, reward, terminal = game_state.frame_step(do_nothing)
     b_img = binarize_img(next_img)
     tmp_x_sequ = np.stack([b_img, b_img, b_img, b_img], axis=2)  #
 
+    time = 0
     # save model
     saver = tf.train.Saver()
     sess.run(tf.initialize_all_variables())
     check_pointer = tf.train.get_checkpoint_state(MODEL_PATH)
     if check_pointer and check_pointer.model_checkpoint_path:
-        saver.save(sess, check_pointer.model_checkpoint_path)
-        print("Save netword model successfully!")
+        saver.restore(sess, check_pointer.model_checkpoint_path)
+        import re
+        match = re.search(u"\d+", check_pointer.model_checkpoint_path)
+        if match:
+            time = int(match.group())
+        print("Load netword model successfully!")
     else:
         print("Could not find a network weights!")
 
-    time = 0
+    OBSERVE = time + observe
     while "bird fly":  # 小鸟起飞
         eplison = INIT_EPLISON * (ITERATION - time) / ITERATION + FINAL_EPLISON
         develop_ = ""
+        _pred_readout = readout.eval(feed_dict={s_t: [tmp_x_sequ]})[0]
         action = np.zeros(ACTIONS)
         if random.random() <= eplison:  # 探索
             idx = random.randrange(ACTIONS)
-            action[idx] = 1.0
+            action[idx] = 1
             develop = u"探索"
         else:
-            idx = np.argmax(readout.eval(feed_dict={s_t: [tmp_x_sequ]})[0])
-            action[idx] = 1.0
+            idx = np.argmax(_pred_readout)
+            action[idx] = 1
             develop = u"开发"
 
         next_img, reward, terminal = game_state.frame_step(action)
@@ -154,8 +161,8 @@ def train(s_t, readout, w_fc, sess):
             y_batch = []
             readout_next_s_t_batch = readout.eval(feed_dict={s_t: next_s_t_X})
             for i, d in enumerate(minibatch):
-                terminal = d[4]
-                if terminal:
+                _terminal = d[4]
+                if _terminal:
                     y_batch.append(r_batch[i] * 1.0)
                 else:
                     y_batch.append(r_batch[i] + GAMMA * np.max(readout_next_s_t_batch[i]))
@@ -168,17 +175,18 @@ def train(s_t, readout, w_fc, sess):
 
         tmp_x_sequ = next_x_sequ
 
-        if time % CHECK_POINTER_TIMES == 0:
+        if time and time % CHECK_POINTER_TIMES == 0:
             saver.save(sess, os.path.join(MODEL_PATH, "dqn-"), global_step=time)
 
-        if time % 100 == 0:
+        if time % 1 == 0:
             print(u"time:{time} / "
                   u"{develop} / "
                   u"eplison: {eplison} / "
                   u"reward:{reward} / {action} /"
-                  u"Terminal:{terminal}".format(time=time, develop=develop,
+                  u"Terminal:{terminal}/ q_max:{pred_readout}".format(time=time, develop=develop,
                                                 eplison=eplison, reward=reward,
-                                                action=("up  " if action[0] > 0.4 else "down"), terminal=terminal))
+                                                action=("down" if action[0] > 0.9 else "up  "), terminal=terminal,
+                                                pred_readout=_pred_readout))
         time += 1
 
 
